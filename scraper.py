@@ -1,28 +1,43 @@
 import os
 import requests
 import xml.etree.ElementTree as ET
-from datetime import datetime
+from bs4 import BeautifulSoup
 
-# 匹配关键词库（涵盖分子生物学、测序技术及生命科学大类）
+# 1. 核心与相关技术/领域关键词
 KEYWORDS = [
+    # 核心技术
     "single-cell", "single cell", "sequencing", "ngs", "pcr", "dpcr", 
     "digital pcr", "library prep", "genomics", "transcriptomics", 
     "spatial transcriptomics", "omics", "microfluidics", "flow cytometry",
+    
+    # 领域/学科兜底关键词（防止因具体技术写在附件里而漏抓）
     "molecular biology", "cell biology", "biochemistry", "cancer research", 
-    "immunology", "biomedical", "biotechnology", "genetics"
+    "immunology", "biomedical", "biotechnology", "genetics", "life sciences"
 ]
 
 EURAXESS_API_URL = "https://euraxess.ec.europa.eu/api/jobs/search"
-# AcademicTransfer 官方 RSS Feed (自动包含最新招聘岗位)
 ACADEMIC_TRANSFER_RSS = "https://www.academictransfer.com/en/rss/"
 
+def get_page_text(url):
+    """进入岗位详情页抓取全文本，防止 API 缺失描述信息"""
+    if not url:
+        return ""
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        res = requests.get(url, headers=headers, timeout=6)
+        if res.status_code == 200:
+            soup = BeautifulSoup(res.text, "html.parser")
+            return soup.get_text().lower()
+    except Exception:
+        pass
+    return ""
+
 def fetch_euraxess_jobs():
-    """抓取 EURAXESS 官方 API"""
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     payload = {
         "researcherProfiles": ["R1"],  # PhD 级别
         "sortBy": "newest",
-        "pageSize": 100
+        "pageSize": 40                 # 抓取最新 40 个，平衡运行速度
     }
     jobs = []
     try:
@@ -43,21 +58,19 @@ def fetch_euraxess_jobs():
     return jobs
 
 def fetch_academic_transfer_jobs():
-    """抓取 AcademicTransfer (荷兰/欧洲) RSS 数据"""
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     jobs = []
     try:
         res = requests.get(ACADEMIC_TRANSFER_RSS, headers=headers, timeout=15)
         if res.status_code == 200:
             root = ET.fromstring(res.content)
-            # 解析 RSS 节点
             for item in root.findall(".//item"):
                 title = item.findtext("title", "")
                 description = item.findtext("description", "")
                 link = item.findtext("link", "")
                 
-                # 筛选包含 PhD/Doctoral 相关的岗位
-                if any(phd_kw in title.lower() or phd_kw in description.lower() for phd_kw in ["phd", "doctoral", "candidate", "researcher"]):
+                # 筛选 PhD 相关岗位
+                if any(phd_kw in title.lower() or phd_kw in description.lower() for phd_kw in ["phd", "doctoral", "candidate"]):
                     jobs.append({
                         "title": title,
                         "description": description,
@@ -71,18 +84,25 @@ def fetch_academic_transfer_jobs():
         print(f"AcademicTransfer 请求失败: {e}")
     return jobs
 
-def filter_and_deduplicate(job_list):
-    """过滤关键词并根据 URL 去重"""
+def filter_jobs(job_list):
     matched = []
     seen_urls = set()
+    
+    print(f"开始深度分析 {len(job_list)} 个候选岗位...")
     
     for job in job_list:
         url = job.get("url", "")
         if not url or url in seen_urls:
             continue
             
-        full_text = f"{job['title']} {job['description']}".lower()
-        matched_kws = [kw for kw in KEYWORDS if kw in full_text]
+        # 先检查已有的标题和简述
+        base_text = f"{job['title']} {job['description']}".lower()
+        matched_kws = [kw for kw in KEYWORDS if kw in base_text]
+        
+        # 如果初步匹配没命中，自动爬取详情页全文本再次搜寻
+        if not matched_kws:
+            detail_text = get_page_text(url)
+            matched_kws = [kw for kw in KEYWORDS if kw in detail_text]
         
         if matched_kws:
             job["hit_keywords"] = matched_kws[:3]
@@ -98,19 +118,18 @@ def send_wechat(jobs):
         return
 
     if not jobs:
-        title = "【多源 PhD 巡检】近期暂无符合背景的新岗位"
-        content = "已检索 EURAXESS 及 AcademicTransfer，未发现新匹配项。脚本稳定运行中！"
+        title = "【巡检提醒】未发现匹配岗位"
+        content = "已完成深层全网检索，暂未发现最新发布的匹配项目。"
     else:
-        title = f"【多源 PhD 巡检】发现 {len(jobs)} 个匹配岗位！"
+        title = f"【PhD岗位巡检】成功为你筛选出 {len(jobs)} 个匹配岗位！"
         content_lines = []
-        for i, j in enumerate(jobs, 1):
+        for i, j in enumerate(jobs[:15], 1): # 每次最多推送前 15 条最相关的
             kws = ", ".join(j.get("hit_keywords", []))
             content_lines.append(f"### {i}. [{j['source']}] {j['title']}\n")
             content_lines.append(f"- **国家**: {j['country']}")
             content_lines.append(f"- **机构**: {j['organisation']}")
             content_lines.append(f"- **匹配词**: `{kws}`")
-            content_lines.append(f"- **截止日期**: {j['deadline']}")
-            content_lines.append(f"- [点击查看详情/直接申请]({j['url']})\n\n---\n")
+            content_lines.append(f"- [点击查看详情/申请]({j['url']})\n\n---\n")
         content = "\n".join(content_lines)
 
     url = f"https://sctapi.ftqq.com/{sendkey}.send"
@@ -121,5 +140,5 @@ if __name__ == "__main__":
     all_jobs.extend(fetch_euraxess_jobs())
     all_jobs.extend(fetch_academic_transfer_jobs())
     
-    final_jobs = filter_and_deduplicate(all_jobs)
+    final_jobs = filter_jobs(all_jobs)
     send_wechat(final_jobs)
