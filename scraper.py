@@ -239,5 +239,5 @@ def send_wechat(core_jobs, broad_jobs):
 
 if __name__ == "__main__":
     raw_jobs = fetch_euraxess_jobs() + fetch_academic_transfer_jobs()
-    core_jobs, broad_jobs = process_and_filter(raw_raw_jobs if 'raw_raw_jobs' in locals() else raw_jobs)
+    core_jobs, broad_jobs = process_and_filter(raw_jobs)
     send_wechat(core_jobs, broad_jobs)
